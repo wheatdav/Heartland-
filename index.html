@@ -1,4 +1,187 @@
-<!doctype html>
+/**
+ * Radio Heartland – Last 10 Songs
+ * Single‑file Node + Express app that serves a tiny web UI and an API.
+ *
+ * How it works:
+ * 1) API route /api/heartland tries several JSON endpoints first (if available).
+ * 2) If JSON fails, it scrapes the public playlist page HTML for titles/artists/timestamps.
+ * 3) The front‑end at / fetches from /api/heartland and renders the last 10.
+ *
+ * Run:
+ *   1) Save this file as server.js
+ *   2) npm init -y
+ *   3) npm i express node-fetch cheerio cors
+ *   4) node server.js
+ *   5) Open http://localhost:3000
+ */
+
+const express = require('express');
+const fetch = require('node-fetch');
+const cheerio = require('cheerio');
+const cors = require('cors');
+
+const app = express();
+app.use(cors());
+
+const PORT = process.env.PORT || 3000;
+
+// --- Helpers -----------------------------------------------------------------
+/** Normalize track objects */
+function toTrack({ title = '', artist = '', playedAt = null, source = '' }) {
+  return {
+    title: title.trim(),
+    artist: artist.trim(),
+    playedAt: playedAt ? new Date(playedAt).toISOString() : null,
+    source,
+  };
+}
+
+/** Deduplicate tracks (keep order) */
+function dedupeTracks(tracks) {
+  const seen = new Set();
+  const out = [];
+  for (const t of tracks) {
+    const key = (t.title + '|' + t.artist).toLowerCase();
+    if (t.title && t.artist && !seen.has(key)) {
+      seen.add(key);
+      out.push(t);
+    }
+  }
+  return out;
+}
+
+// --- Data sources -------------------------------------------------------------
+// 1) Attempt JSON APIs first (these may change; app will gracefully fall back)
+const JSON_ENDPOINTS = [
+  // Historically used by The Current / MPR services. One of these may exist.
+  'https://api.thecurrent.org/playlist?format=json&limit=10&channel=heartland',
+  'https://api.thecurrent.org/playlist?format=json&limit=10&stream=heartland',
+  'https://api.thecurrent.org/playlist/radio-heartland?format=json&limit=10',
+];
+
+// 2) Official playlist page (HTML) – we’ll scrape as a fallback
+const PLAYLIST_HTML = 'https://www.thecurrent.org/playlist/radio-heartland';
+
+async function tryJsonEndpoints() {
+  for (const url of JSON_ENDPOINTS) {
+    try {
+      const res = await fetch(url, { headers: { 'accept': 'application/json' } });
+      if (!res.ok) continue;
+      const data = await res.json();
+
+      // Try a few common shapes
+      let items = [];
+      if (Array.isArray(data)) items = data;
+      else if (Array.isArray(data.songs)) items = data.songs;
+      else if (Array.isArray(data.playlist)) items = data.playlist;
+      else if (data.results && Array.isArray(data.results)) items = data.results;
+
+      if (!items.length) continue;
+
+      const tracks = items.map((it) => {
+        // Common field patterns
+        const title = it.title || it.song || it.track || it.song_title || '';
+        const artist = it.artist || it.artist_name || it.performer || '';
+        const playedAt = it.played_at || it.date || it.time || it.timestamp || null;
+        return toTrack({ title, artist, playedAt, source: url });
+      });
+
+      return dedupeTracks(tracks).slice(0, 10);
+    } catch (_) {
+      // try next
+    }
+  }
+  return null; // none worked
+}
+
+async function scrapePlaylistHtml() {
+  const res = await fetch(PLAYLIST_HTML, { headers: { 'user-agent': 'Mozilla/5.0' } });
+  if (!res.ok) throw new Error('Failed to load playlist HTML');
+  const html = await res.text();
+  const $ = cheerio.load(html);
+
+  const candidates = [];
+
+  // Strategy A: list items with obvious classes
+  $('li, article, .playlist, .song, .track').each((_, el) => {
+    const node = $(el);
+
+    const title =
+      node.find('[data-song-title]').attr('data-song-title') ||
+      node.find('.song-title, .title, .track-title, .c-title').first().text().trim();
+
+    const artist =
+      node.find('[data-artist-name]').attr('data-artist-name') ||
+      node.find('.artist, .song-artist, .c-artist, .performer').first().text().trim();
+
+    // Grab a timestamp if present
+    const timeText =
+      node.find('time').attr('datetime') ||
+      node.find('time').text().trim() ||
+      node.find('.time, .timestamp, .c-time').first().text().trim();
+
+    if (title && artist) {
+      const playedAt = timeText && /\d/.test(timeText) ? timeText : null;
+      candidates.push(toTrack({ title, artist, playedAt, source: PLAYLIST_HTML }));
+    }
+  });
+
+  // Strategy B: Look for JSON in script tags (hydration/state blobs)
+  if (candidates.length < 10) {
+    $('script').each((_, el) => {
+      const txt = $(el).html() || '';
+      try {
+        // Find JSON arrays of objects with title+artist fields
+        const jsonCandidates = [];
+        const matches = txt.match(/\{[^]*?\}/g) || [];
+        for (const m of matches) {
+          try {
+            const obj = JSON.parse(m);
+            if (
+              obj &&
+              (obj.title || obj.song || obj.track) &&
+              (obj.artist || obj.artist_name || obj.performer)
+            ) {
+              jsonCandidates.push(obj);
+            }
+          } catch (_) {}
+        }
+        if (jsonCandidates.length) {
+          for (const it of jsonCandidates) {
+            const title = it.title || it.song || it.track || '';
+            const artist = it.artist || it.artist_name || it.performer || '';
+            const playedAt = it.played_at || it.time || null;
+            if (title && artist) candidates.push(toTrack({ title, artist, playedAt, source: PLAYLIST_HTML + '#script' }));
+          }
+        }
+      } catch (_) {}
+    });
+  }
+
+  const tracks = dedupeTracks(candidates).slice(0, 10);
+  if (!tracks.length) throw new Error('Could not parse playlist HTML');
+  return tracks;
+}
+
+// --- API ---------------------------------------------------------------------
+app.get('/api/heartland', async (req, res) => {
+  try {
+    const fromJson = await tryJsonEndpoints();
+    if (fromJson && fromJson.length) {
+      return res.json({ ok: true, source: 'json', items: fromJson });
+    }
+
+    const fromHtml = await scrapePlaylistHtml();
+    return res.json({ ok: true, source: 'html', items: fromHtml });
+  } catch (err) {
+    res.status(502).json({ ok: false, error: err.message, hint: 'The playlist page/API layout may have changed.' });
+  }
+});
+
+// --- UI ----------------------------------------------------------------------
+app.get('/', (_req, res) => {
+  res.setHeader('content-type', 'text/html; charset=utf-8');
+  res.end(`<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
@@ -7,7 +190,7 @@
     <style>
       :root { --bg:#0b1020; --fg:#ecf0f1; --muted:#9aa6b2; --card:#141c2f; --accent:#56b6c2; }
       *{ box-sizing:border-box; }
-      body{ margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; background:var(--bg); color:var(--fg); }
+      body{ margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji","Segoe UI Emoji"; background:var(--bg); color:var(--fg); }
       header{ padding:24px; text-align:center; }
       h1{ margin:0 0 6px 0; font-size:clamp(20px, 3vw, 28px); }
       p{ margin:0; color:var(--muted); }
@@ -49,59 +232,30 @@
       const sourceTag = document.getElementById('sourceTag');
       const refreshBtn = document.getElementById('refreshBtn');
 
-      async function fetchPlaylist() {
-        try {
-          // Use the public playlist page (HTML) — simple scrape with regex
-          const res = await fetch('https://www.thecurrent.org/playlist/radio-heartland');
-          const html = await res.text();
-
-          // Try to extract JSON embedded in the page
-          const jsonMatch = html.match(/window\.__DATA__\s*=\s*(\{.*?\});/);
-          let tracks = [];
-          if (jsonMatch) {
-            try {
-              const data = JSON.parse(jsonMatch[1]);
-              if (data && data.page && data.page.tracks) {
-                tracks = data.page.tracks;
-              }
-            } catch (e) {}
-          }
-
-          // Fallback: simple regex for title/artist in HTML
-          if (!tracks.length) {
-            const regex = /<div class=\"song\">[\s\S]*?<div class=\"title\">(.*?)<\/div>[\s\S]*?<div class=\"artist\">(.*?)<\/div>/g;
-            let m;
-            while ((m = regex.exec(html)) !== null) {
-              tracks.push({ title: m[1], artist: m[2] });
-            }
-          }
-
-          return tracks.slice(0, 10);
-        } catch (e) {
-          throw new Error('Could not fetch playlist');
-        }
-      }
-
       async function load() {
         errEl.style.display = 'none';
         listEl.innerHTML = '';
         sourceTag.textContent = 'Loading…';
         try {
-          const items = await fetchPlaylist();
-          sourceTag.textContent = 'Source: Public page';
+          const res = await fetch('/api/heartland');
+          const data = await res.json();
+          if (!data.ok) throw new Error(data.error || 'Unknown error');
+          sourceTag.textContent = data.source === 'json' ? 'Source: JSON API' : 'Source: HTML fallback';
 
+          const items = data.items || [];
           if (!items.length) throw new Error('No items found');
 
           items.forEach((t, i) => {
             const row = document.createElement('div');
             row.className = 'row';
+            const played = t.playedAt ? new Date(t.playedAt).toLocaleString() : '';
             row.innerHTML = `
               <div class="idx">${String(i+1).padStart(2,'0')}</div>
               <div class="meta">
-                <div class="title">${t.title || ''}</div>
-                <div class="artist">${t.artist || ''}</div>
+                <div class="title" title="${t.title}">${t.title}</div>
+                <div class="artist" title="${t.artist}">${t.artist}</div>
               </div>
-              <div class="time"></div>
+              <div class="time" title="${played}">${played}</div>
             `;
             listEl.appendChild(row);
           });
@@ -114,6 +268,13 @@
 
       refreshBtn.addEventListener('click', load);
       load();
+      // Optional: auto-refresh every 60s
+      // setInterval(load, 60000);
     </script>
   </body>
-</html>
+</html>`);
+});
+
+app.listen(PORT, () => {
+  console.log(`✓ Radio Heartland — Last 10 Songs running on http://localhost:${PORT}`);
+});
