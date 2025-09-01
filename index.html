@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Radio Heartland — Last 10 Songs</title>
+    <style>
+      :root { --bg:#0b1020; --fg:#ecf0f1; --muted:#9aa6b2; --card:#141c2f; --accent:#56b6c2; }
+      *{ box-sizing:border-box; }
+      body{ margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; background:var(--bg); color:var(--fg); }
+      header{ padding:24px; text-align:center; }
+      h1{ margin:0 0 6px 0; font-size:clamp(20px, 3vw, 28px); }
+      p{ margin:0; color:var(--muted); }
+      main{ max-width:760px; margin:0 auto; padding:20px; }
+      .card{ background:var(--card); border-radius:16px; padding:16px; box-shadow: 0 8px 24px rgba(0,0,0,.25); }
+      .row{ display:grid; grid-template-columns: 72px 1fr auto; gap:12px; align-items:center; padding:10px 8px; border-radius:12px; }
+      .row + .row{ margin-top:6px; }
+      .idx{ width:48px; height:48px; display:grid; place-items:center; background:rgba(255,255,255,.04); border-radius:12px; font-weight:600; }
+      .meta{ display:flex; flex-direction:column; min-width:0; }
+      .title{ font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+      .artist{ color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+      .time{ font-variant-numeric:tabular-nums; color:var(--muted); font-size:12px; }
+      .tag{ display:inline-block; padding:2px 8px; border-radius:999px; background:rgba(86,182,194,.15); color:var(--accent); font-size:12px; }
+      .footer{ margin-top:14px; color:var(--muted); font-size:12px; text-align:center; }
+      .err{ background:#3a0d10; color:#ffd9df; padding:12px; border-radius:12px; }
+      .refresh{ display:inline-flex; gap:8px; align-items:center; border:0; background:rgba(255,255,255,.06); color:var(--fg); padding:8px 12px; border-radius:10px; cursor:pointer; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Radio Heartland — Last 10 Songs</h1>
+      <p>Live, acoustic, Americana & roots, curated by MPR.</p>
+    </header>
+    <main>
+      <div class="card">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+          <span class="tag" id="sourceTag">Loading…</span>
+          <button class="refresh" id="refreshBtn" title="Refresh">↻ Refresh</button>
+        </div>
+        <div id="list"></div>
+        <div id="error" class="err" style="display:none;"></div>
+        <div class="footer">Data from The Current / MPR public playlist. This is an unofficial helper app.</div>
+      </div>
+    </main>
+
+    <script>
+      const listEl = document.getElementById('list');
+      const errEl = document.getElementById('error');
+      const sourceTag = document.getElementById('sourceTag');
+      const refreshBtn = document.getElementById('refreshBtn');
+
+      async function fetchPlaylist() {
+        try {
+          // Use the public playlist page (HTML) — simple scrape with regex
+          const res = await fetch('https://www.thecurrent.org/playlist/radio-heartland');
+          const html = await res.text();
+
+          // Try to extract JSON embedded in the page
+          const jsonMatch = html.match(/window\.__DATA__\s*=\s*(\{.*?\});/);
+          let tracks = [];
+          if (jsonMatch) {
+            try {
+              const data = JSON.parse(jsonMatch[1]);
+              if (data && data.page && data.page.tracks) {
+                tracks = data.page.tracks;
+              }
+            } catch (e) {}
+          }
+
+          // Fallback: simple regex for title/artist in HTML
+          if (!tracks.length) {
+            const regex = /<div class=\"song\">[\s\S]*?<div class=\"title\">(.*?)<\/div>[\s\S]*?<div class=\"artist\">(.*?)<\/div>/g;
+            let m;
+            while ((m = regex.exec(html)) !== null) {
+              tracks.push({ title: m[1], artist: m[2] });
+            }
+          }
+
+          return tracks.slice(0, 10);
+        } catch (e) {
+          throw new Error('Could not fetch playlist');
+        }
+      }
+
+      async function load() {
+        errEl.style.display = 'none';
+        listEl.innerHTML = '';
+        sourceTag.textContent = 'Loading…';
+        try {
+          const items = await fetchPlaylist();
+          sourceTag.textContent = 'Source: Public page';
+
+          if (!items.length) throw new Error('No items found');
+
+          items.forEach((t, i) => {
+            const row = document.createElement('div');
+            row.className = 'row';
+            row.innerHTML = `
+              <div class="idx">${String(i+1).padStart(2,'0')}</div>
+              <div class="meta">
+                <div class="title">${t.title || ''}</div>
+                <div class="artist">${t.artist || ''}</div>
+              </div>
+              <div class="time"></div>
+            `;
+            listEl.appendChild(row);
+          });
+        } catch (err) {
+          errEl.textContent = 'Error: ' + err.message;
+          errEl.style.display = 'block';
+          sourceTag.textContent = 'Error';
+        }
+      }
+
+      refreshBtn.addEventListener('click', load);
+      load();
+    </script>
+  </body>
+</html>
