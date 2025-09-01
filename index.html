@@ -2,47 +2,37 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Radio Heartland – Last 10 Songs</title>
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="apple-touch-icon" href="icon.png">
   <style>
-    body {
-      font-family: Arial, sans-serif;
-      padding: 1rem;
-      background: #fafafa;
-    }
-    h1 {
-      font-size: 1.5rem;
-    }
-    ul {
-      list-style: none;
-      padding: 0;
-    }
-    li {
-      padding: 0.5rem 0;
-      border-bottom: 1px solid #ddd;
-    }
+    body { font-family: Arial, sans-serif; padding: 1rem; background: #fafafa; }
+    h1 { font-size: 1.5rem; }
+    ul { list-style: none; padding: 0; }
+    li { padding: 0.5rem 0; border-bottom: 1px solid #ddd; }
+    button { margin-bottom: 1rem; padding: 0.5rem 1rem; font-size: 1rem; cursor: pointer; }
   </style>
 </head>
 <body>
   <h1>Last 10 Songs on Radio Heartland</h1>
+  <button id="refreshBtn">Refresh</button>
   <ul id="songs"><li>Loading...</li></ul>
 
   <script>
     async function fetchSongs() {
       try {
-        // Use AllOrigins proxy
-        const url = 'https://api.allorigins.win/get?url=' + encodeURIComponent('https://www.thecurrent.org/playlist/radio-heartland');
-        const res = await fetch(url);
-        if (!res.ok) throw new Error("Failed to fetch");
-        const data = await res.json();
+        const proxyUrl = 'https://api.allorigins.win/raw?url=' + encodeURIComponent('https://www.thecurrent.org/playlist/radio-heartland');
+        const html = await fetch(proxyUrl).then(r => r.text());
 
-        // Parse returned HTML
         const parser = new DOMParser();
-        const doc = parser.parseFromString(data.contents, 'text/html');
+        const doc = parser.parseFromString(html, 'text/html');
         const items = [...doc.querySelectorAll('.song')].slice(0, 10);
 
         const ul = document.getElementById('songs');
         ul.innerHTML = '';
-        if (items.length === 0) {
+        if (!items.length) {
           ul.innerHTML = '<li>No songs found.</li>';
           return;
         }
@@ -60,6 +50,7 @@
       }
     }
 
+    document.getElementById('refreshBtn').addEventListener('click', fetchSongs);
     fetchSongs();
   </script>
 </body>
